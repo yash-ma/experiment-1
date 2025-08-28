@@ -1,0 +1,149 @@
+# === Setup & Data ===
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Optional: seaborn for quick EDA plots (comment out if you prefer pure matplotlib)
+import seaborn as sns
+
+CSV_PATH = "https://drive.google.com/uc?id=1zR1iA6CNM2aQQRkdRXPwavp4vgJJ35lw"
+df = pd.read_csv(CSV_PATH)
+  # <-- change path
+TARGET_COL = "Salary"                                    # <-- change if needed
+VALIDATION_FRACTION = 0.2
+RANDOM_SEED = 42
+
+df = pd.read_csv(CSV_PATH)
+
+# --- EDA (light) ---
+print("Head:\n", df.head(), "\n")
+print("Info:")
+print(df.info(), "\n")
+print("Missing values per column:\n", df.isna().sum(), "\n")
+print("Describe (numeric):\n", df.describe(), "\n")
+
+# If target col not set or missing, default to last column
+if TARGET_COL not in df.columns:
+    TARGET_COL = df.columns[-1]
+
+# Keep only numeric features
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+if TARGET_COL not in numeric_cols:
+    raise ValueError("Target column must be numeric.")
+
+feature_cols = [c for c in numeric_cols if c != TARGET_COL]
+if len(feature_cols) == 0:
+    raise ValueError("No numeric feature columns found apart from target.")
+
+# (Optional) Quick pairwise look
+# sns.pairplot(df[feature_cols + [TARGET_COL]])
+# plt.show()
+
+# --- Clean & split ---
+df = df.dropna(subset=feature_cols + [TARGET_COL]).copy()
+
+X = df[feature_cols].to_numpy(dtype=float)
+y = df[TARGET_COL].to_numpy(dtype=float).reshape(-1, 1)
+
+# Shuffle + split (no sklearn)
+rng = np.random.default_rng(RANDOM_SEED)
+idx = rng.permutation(len(X))
+split = int(len(X) * (1 - VALIDATION_FRACTION))
+train_idx, val_idx = idx[:split], idx[split:]
+
+X_train, X_val = X[train_idx], X[val_idx]
+y_train, y_val = y[train_idx], y[val_idx]
+
+# --- Standardize features using TRAIN stats only ---
+X_mu = X_train.mean(axis=0, keepdims=True)
+X_sd = X_train.std(axis=0, keepdims=True)
+X_sd[X_sd == 0] = 1.0  # avoid divide-by-zero
+
+X_train_std = (X_train - X_mu) / X_sd
+X_val_std   = (X_val   - X_mu) / X_sd
+
+# Add bias term
+def add_bias(X_):
+    return np.hstack([np.ones((X_.shape[0], 1)), X_])
+
+Xb_train = add_bias(X_train_std)
+Xb_val   = add_bias(X_val_std)
+
+def mse(y_true, y_pred):
+    return float(np.mean((y_true - y_pred) ** 2))
+
+# === Gradient Descent ===
+def gradient_descent(Xb, y, lr=0.05, epochs=1000):
+    m, n = Xb.shape
+    theta = np.zeros((n, 1))
+    losses = []
+    thetas = []  # store for animation (only useful for 1D feature)
+    for ep in range(epochs):
+        y_hat = Xb @ theta
+        grad = (2/m) * (Xb.T @ (y_hat - y))
+        theta -= lr * grad
+        if ep % 1 == 0:
+            losses.append(mse(y, y_hat))
+            thetas.append(theta.copy())
+    return theta, losses, thetas
+
+# You can tune lr/epochs if needed
+theta_gd, train_losses, theta_history = gradient_descent(Xb_train, y_train, lr=0.1, epochs=800)
+
+# Evaluate on validation
+y_val_pred_gd = Xb_val @ theta_gd
+mse_val_gd = mse(y_val, y_val_pred_gd)
+print(f"Validation MSE (Gradient Descent): {mse_val_gd:.4f}")
+
+# === Normal Equation ===
+# theta = (X^T X)^(-1) X^T y   (with tiny ridge for stability)
+def normal_equation(Xb, y, ridge_lambda=1e-8):
+    n = Xb.shape[1]
+    A = Xb.T @ Xb + ridge_lambda * np.eye(n)
+    b = Xb.T @ y
+    theta = np.linalg.solve(A, b)
+    return theta
+
+theta_ne = normal_equation(Xb_train, y_train)
+y_val_pred_ne = Xb_val @ theta_ne
+mse_val_ne = mse(y_val, y_val_pred_ne)
+print(f"Validation MSE (Normal Equation): {mse_val_ne:.4f}")
+
+# === Loss Curve ===
+plt.figure()
+plt.plot(train_losses)
+plt.xlabel("Epoch")
+plt.ylabel("Train MSE")
+plt.title("Gradient Descent Loss Curve")
+plt.show()
+
+# === Animation (only if exactly ONE feature) ===
+# For animation we need 1D (one feature + bias). If multiple features, we skip.
+if X_train_std.shape[1] == 1:
+    from matplotlib.animation import FuncAnimation
+    x1_train = X_train_std[:, 0:1]  # shape (m,1)
+    x_plot = np.linspace(x1_train.min()-0.5, x1_train.max()+0.5, 200).reshape(-1, 1)
+    Xb_plot = add_bias(x_plot)
+
+    fig, ax = plt.subplots()
+    ax.scatter(x1_train, y_train, alpha=0.6, label="train")
+    (line,) = ax.plot([], [], lw=2, label="model")
+    ax.set_xlabel(f"{feature_cols[0]} (standardized)")
+    ax.set_ylabel(TARGET_COL)
+    ax.set_title("Gradient Descent Line Fit (Animation)")
+    ax.legend()
+
+    def init():
+        line.set_data([], [])
+        return (line,)
+
+    def update(frame):
+        th = theta_history[frame]
+        y_line = Xb_plot @ th
+        line.set_data(x_plot.ravel(), y_line.ravel())
+        return (line,)
+
+    ani = FuncAnimation(fig, update, frames=len(theta_history), init_func=init, blit=True, interval=30)
+    plt.show()
+else:
+    print("Animation skipped: requires exactly ONE numeric feature (besides target).")
